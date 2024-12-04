@@ -22,123 +22,160 @@ using System.Threading;
 using System.Net;
 using System.Net.Sockets;
 using Protocolo;
+using System.Linq;
 
 namespace Servidor
 {
     class Servidor
     {
+        private static TcpListener escuchador; // Objeto para escuchar conexiones TCP entrantes
+        private static Dictionary<string, int> listadoClientes = new Dictionary<string, int>(); // Diccionario para rastrear el número de solicitudes por cliente
+        private static Protocolo.Protocolo1 protocolo = new Protocolo.Protocolo1(); // Instancia de la clase Protocolo para manejar mensajes
+
         static void Main(string[] args)
         {
-            TcpListener escucha1 = null;
             try
             {
-                // Crea un objeto TcpListener para escuchar conexiones en el puerto 8080
-                escucha1 = new TcpListener(IPAddress.Any, 8080);
-                escucha1.Start(); // Inicia el servidor
+                // Configura el servidor para escuchar en cualquier IP en el puerto 8080
+                escuchador = new TcpListener(IPAddress.Any, 8080);
+                escuchador.Start();
+                Console.WriteLine("Servidor inició en el puerto 8080...");
 
+                // Bucle infinito para aceptar múltiples conexiones
                 while (true)
                 {
-                    Console.WriteLine("Esperando conexión...");
-                    // Espera la llegada de un cliente y acepta la conexión
-                    TcpClient cliente = escucha1.AcceptTcpClient();
-                    NetworkStream flujo = cliente.GetStream(); // Obtiene el flujo de datos del cliente
-
-                    // Crea un buffer para recibir datos del cliente
-                    byte[] bufferRx = new byte[1024];
-                    int bytesRx = flujo.Read(bufferRx, 0, bufferRx.Length); // Lee los datos recibidos
-                    string mensaje = Encoding.UTF8.GetString(bufferRx, 0, bytesRx); // Convierte los bytes a una cadena
-
-                    // Extrae el comando y los parámetros del mensaje recibido
-                    Pedido pedido = new Pedido
-                    {
-                        Comando = mensaje.Split(' ')[0], // Primer palabra del mensaje como comando
-                        Parametros = mensaje.Split(' ').Skip(1).ToArray() // Resto de las palabras como parámetros
-                    };
-
-                    // Procesa el pedido recibido y genera una respuesta
-                    Respuesta respuesta = ResolverPedido(pedido);
-
-                    // Convierte la respuesta en bytes y la envía al cliente
-                    byte[] bufferTx = Encoding.UTF8.GetBytes(respuesta.Estado + " " + respuesta.Mensaje);
-                    flujo.Write(bufferTx, 0, bufferTx.Length);
-
-                    // Cierra la conexión con el cliente después de enviar la respuesta
-                    flujo.Close();
-                    cliente.Close();
+                    TcpClient cliente = escuchador.AcceptTcpClient(); // Acepta un cliente entrante
+                    Console.WriteLine("Cliente conectado, puerto: {0}", cliente.Client.RemoteEndPoint.ToString());
+                    // Crea un nuevo hilo para manejar la conexión del cliente
+                    Thread hiloCliente = new Thread(ManipuladorCliente);
+                    hiloCliente.Start(cliente);
                 }
             }
             catch (SocketException ex)
             {
-                // Captura y muestra errores relacionados con la conexión
-                Console.WriteLine("SocketException: {0}", ex);
+                // Manejo de errores de conexión
+                Console.WriteLine("Error de socket al iniciar el servidor: " + ex.Message);
             }
             finally
             {
-                // Detiene el servidor de escuchar nuevas conexiones
-                escucha1?.Stop();
+                // Asegura que el servidor se detenga correctamente en caso de error
+                escuchador?.Stop();
             }
         }
 
-        // Procesa los diferentes comandos enviados por el cliente
-        private static Respuesta ResolverPedido(Pedido pedido, string direccionCliente)
+        private static void ManipuladorCliente(object obj)
         {
-            switch (pedido.Comando)
+            TcpClient cliente = (TcpClient)obj; // Convierte el objeto recibido en un TcpClient
+            NetworkStream flujo = null; // Flujo de datos para la comunicación con el cliente
+            try
+            {
+                flujo = cliente.GetStream(); // Obtiene el flujo de datos del cliente
+                byte[] bufferTx; // Buffer para enviar datos
+                byte[] bufferRx = new byte[1024]; // Buffer para recibir datos
+                int bytesRx;
+
+                // Bucle para recibir datos del cliente mientras la conexión esté activa
+                while ((bytesRx = flujo.Read(bufferRx, 0, bufferRx.Length)) > 0)
+                {
+                    string mensajeRx = Encoding.UTF8.GetString(bufferRx, 0, bytesRx); // Decodifica el mensaje recibido
+                    var (comando, parametros) = DescomponerPedido(mensajeRx); // Descompone el mensaje en comando y parámetros
+                    Console.WriteLine("Se recibió: " + mensajeRx);
+
+                    string direccionCliente = cliente.Client.RemoteEndPoint.ToString(); // Obtiene la dirección del cliente
+                    string respuesta = ResolverPedido(comando, parametros, direccionCliente); // Resuelve la solicitud del cliente
+                    Console.WriteLine("Se envió: " + respuesta);
+
+                    bufferTx = Encoding.UTF8.GetBytes(respuesta); // Codifica la respuesta
+                    flujo.Write(bufferTx, 0, bufferTx.Length); // Envía la respuesta al cliente
+                }
+
+            }
+            catch (SocketException ex)
+            {
+                // Manejo de errores durante la comunicación con el cliente
+                Console.WriteLine("Error de socket al manejar el cliente: " + ex.Message);
+            }
+            finally
+            {
+                // Cierra el flujo y la conexión del cliente
+                flujo?.Close();
+                cliente?.Close();
+            }
+        }
+
+        // Método para descomponer un mensaje en comando y parámetros
+        private static (string comando, string[] parametros) DescomponerPedido(string mensaje)
+        {
+            var partes = mensaje.Split(' '); // Divide el mensaje en partes usando espacios
+            string comando = partes[0]; // El primer elemento es el comando
+            string[] parametros = partes.Length > 1 ? partes.Skip(1).ToArray() : new string[] { }; // Los elementos restantes son parámetros
+            return (comando, parametros);
+        }
+
+        // Método para resolver la solicitud del cliente según el comando recibido
+        private static string ResolverPedido(string comando, string[] parametros, string direccionCliente)
+        {
+            string estado = "NOK"; // Estado por defecto en caso de error
+            string mensaje = "Comando no reconocido"; // Mensaje por defecto en caso de comando inválido
+
+            switch (comando)
             {
                 case "INGRESO":
-                    // Verifica si las credenciales son correctas
-                    if (pedido.Parametros[0] == "admin" && pedido.Parametros[1] == "1234")
+                    // Valida las credenciales del usuario
+                    if (parametros.Length == 2 && parametros[0] == "root" && parametros[1] == "admin20")
                     {
-                        return new Respuesta { Estado = "OK", Mensaje = "ACCESO_CONCEDIDO" };
+                        estado = new Random().Next(2) == 0 ? "OK" : "NOK"; // Simula un acceso aleatorio
+                        mensaje = estado == "OK" ? "ACCESO_CONCEDIDO" : "ACCESO_NEGADO";
                     }
                     else
                     {
-                        return new Respuesta { Estado = "NOK", Mensaje = "ACCESO_DENEGADO" };
+                        mensaje = "ACCESO_NEGADO"; // Credenciales inválidas
                     }
+                    break;
 
                 case "CALCULO":
-                    // Valida la estructura de los parámetros recibidos
-                    if (pedido.Parametros.Length == 3)
+                    // Procesa la solicitud de validación de placa
+                    if (parametros.Length == 3)
                     {
-                        string modelo = pedido.Parametros[0];
-                        string marca = pedido.Parametros[1];
-                        string placa = pedido.Parametros[2];
-                        if (ValidarPlaca(placa)) // Verifica si la placa tiene un formato válido
+                        string placa = parametros[2];
+                        if (ValidarPlaca(placa)) // Valida el formato de la placa
                         {
-                            byte indicadorDia = ObtenerIndicadorDia(placa); // Determina el día de restricción vehicular
-                            ContadorCliente(direccionCliente); // Incrementa el contador de solicitudes del cliente
-                            return new Respuesta { Estado = "OK", Mensaje = $"{placa} {indicadorDia}" };
+                            byte indicadorDia = ObtenerIndicadorDia(placa); // Calcula el día permitido según la placa
+                            estado = "OK";
+                            mensaje = $"{placa} {indicadorDia}";
+                            ContadorCliente(direccionCliente); // Actualiza el contador de solicitudes del cliente
                         }
                         else
                         {
-                            return new Respuesta { Estado = "NOK", Mensaje = "Placa no válida" };
+                            mensaje = "Placa no válida"; // La placa no cumple con el formato requerido
                         }
                     }
-                    return new Respuesta { Estado = "NOK", Mensaje = "Parámetros incorrectos" };
+                    break;
 
                 case "CONTADOR":
-                    // Verifica si el cliente ha realizado solicitudes previas
+                    // Devuelve el número de solicitudes realizadas por el cliente
                     if (listadoClientes.ContainsKey(direccionCliente))
                     {
-                        return new Respuesta { Estado = "OK", Mensaje = listadoClientes[direccionCliente].ToString() };
+                        estado = "OK";
+                        mensaje = listadoClientes[direccionCliente].ToString();
                     }
                     else
                     {
-                        return new Respuesta { Estado = "NOK", Mensaje = "No hay solicitudes previas" };
+                        mensaje = "No hay solicitudes previas"; // El cliente no ha realizado solicitudes previas
                     }
-
-                default:
-                    // Maneja comandos desconocidos o no implementados
-                    return new Respuesta { Estado = "NOK", Mensaje = "COMANDO_DESCONOCIDO" };
+                    break;
             }
+
+            return protocolo.CrearPedido(estado, new[] { mensaje }); // Crea y devuelve la respuesta usando el protocolo
         }
 
-        // Valida el formato de la placa vehicular usando una expresión regular
+        // Método para validar el formato de una placa de vehículo
         private static bool ValidarPlaca(string placa)
         {
-            return Regex.IsMatch(placa, @"^[A-Z]{3}[0-9]{4}$");
+            return Regex.IsMatch(placa, @"^[A-Z]{3}[0-9]{4}$"); // Expresión regular para placas: 3 letras seguidas de 4 números
         }
 
-        // Determina el día de restricción vehicular basado en el último dígito de la placa
+        // Método para determinar el día de circulación según el último dígito de la placa
         private static byte ObtenerIndicadorDia(string placa)
         {
             int ultimoDigito = int.Parse(placa.Substring(6, 1)); // Extrae el último dígito de la placa
@@ -164,7 +201,7 @@ namespace Servidor
             }
         }
 
-        // Cuenta las solicitudes realizadas por un cliente específico
+        // Método para contar las solicitudes realizadas por cada cliente
         private static void ContadorCliente(string direccionCliente)
         {
             if (listadoClientes.ContainsKey(direccionCliente))
@@ -173,7 +210,7 @@ namespace Servidor
             }
             else
             {
-                listadoClientes[direccionCliente] = 1; // Inicia el contador si es la primera solicitud
+                listadoClientes[direccionCliente] = 1; // Inicializa el contador si es un cliente nuevo
             }
         }
     }
